@@ -5,24 +5,31 @@ import queue
 import threading
 import traceback
 import urllib.parse
+import random
 import swiftclient
 import sys
+import time
+
+
+RETRIES = 10
 
 
 def iterate_listing(list_func):
     marker = ''
     while True:
         tries = 0
-        while tries < 3:
+        while tries < RETRIES:
             try:
                 _, listing = list_func(marker=marker)
-                tries = 10
+                tries = RETRIES + 10
             except Exception as e:
-                print('Iterate failed at marker={}: {}'.format(marker, repr(e)))
-                if tries == 3:
+                print('Iterate failed at marker={}: {}'.format(
+                    marker, repr(e)))
+                if tries == RETRIES:
                     raise e
+            time.sleep(random.randint(1, 1000) * tries)
             tries += 1
- 
+
         if not listing:
             break
         for entry in listing:
