@@ -115,10 +115,11 @@ def process_tenant(data):
                     objlist.extend(listing)
 
             for so in objlist:
-                print "GET object: " + str(so['name'])
-                marker = str(so['name'])
-                download_objoect(swift_s, sc['name'], so['name'],
-                                 download_location)
+                if 'swift' not in so.get('content_location', []):
+                    print "GET object: " + str(so['name'])
+                    marker = str(so['name'])
+                    download_objoect(swift_s, sc['name'], so['name'],
+                                     download_location)
         swift_s.close()
     except Exception as err:
         print data[1] + ": " + str(err)
