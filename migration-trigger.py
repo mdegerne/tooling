@@ -4,7 +4,6 @@ import swiftclient
 import pprint
 import Queue
 import threading
-import time
 import timeit
 import ConfigParser
 import sys
@@ -59,6 +58,7 @@ class ContainerProcessor(object):
             self.queue.task_done()
 
     def stop(self):
+        print "Stop called"
         self.queue.join()
         for i in range(OBJECT_WORKERS):
             self.queue.put(None)
@@ -73,7 +73,6 @@ def get_Config():
     global n_tenant_threads
     global account_list
     global source_swift_base
-    global download_location
 
     config = ConfigParser.ConfigParser()
     config.read(r'migration-trigger.conf')
@@ -83,31 +82,25 @@ def get_Config():
     n_tenant_threads = config.getint('global', 'n_tenant_threads')
     account_list = config.get('global', 'account_list')
     source_swift_base = config.get('global', 'source_swift_base')
-    download_location = config.get('global', 'download_location')
 
 
 class tenantThread(threading.Thread):
-    def __init__(self, threadID, name, q, l,):
+    def __init__(self, threadID, name, q,):
         threading.Thread.__init__(self)
         self.threadID = threadID
         self.name = name
         self.q = q
-        self.L = l
 
     def run(self):
-        process_tenant_thread(self.name, self.q, self.L)
+        process_tenant_thread(self.name, self.q)
 
 
-def process_tenant_thread(threadName, q, l):
+def process_tenant_thread(threadName, q):
     while not exitFlag:
-        l.acquire()
-        if not q.empty():
-            data = q.get()
-            l.release()
-            process_tenant(data)
-        else:
-            l.release()
-        time.sleep(1)
+        data = q.get()
+        if data is None:
+            break
+        process_tenant(data)
 
 
 def make_tenant_threadlist(int_tenant_threads):
@@ -124,18 +117,17 @@ def process_tenant(data):
     global source_auth_url
     global account_list
     global source_swift_base
-    global download_location
 
-    print admin_user
-    print admin_pass
-    print source_auth_url
-    print account_list
-    print source_swift_base
-    print download_location
+    print "admin_user:", admin_user
+    print "admin_pass:", admin_pass
+    print "source_auth_url:", source_auth_url
+    print "account_list:", account_list
+    print "source_swift_base:", source_swift_base
 
     processor = ContainerProcessor(admin_user, admin_pass, source_auth_url,
                                    source_swift_base + data[1])
 
+    container_marker = ''
     conn = swiftclient.client.Connection(
         authurl=source_auth_url,
         user=admin_user,
@@ -143,18 +135,31 @@ def process_tenant(data):
         tenant_name=admin_user,
         auth_version='2.0',
         os_options={'object_storage_url': source_swift_base+data[1]})
-    _, containers = conn.get_account()
-    while containers:
+    _, containers = conn.get_account(marker=container_marker)
+    while containers and containers[-1]['name'] != container_marker:
 
         for sc in containers:
-            _, oblist = conn.get_container(sc['name'])
-            while oblist:
+            marker = ''
+            _, oblist = conn.get_container(sc['name'], marker=marker)
+            print 'looking in', sc['name']
+            get_count = 0
+            skip_count = 0
+            while oblist and oblist[-1]['name'] != marker:
                 for ob in oblist:
-                    if 'swift' not in ob.get('content_location', []):
+                    cl = ob.get('content_location')
+                    if cl and 'swift' not in cl:
                         processor.queue.put({'container': sc['name'],
                                              'name': ob['name']})
-                _, objlist = conn.get_container(sc['name'], marker=oblist[-1])
-        _, containers = conn.get_account(marker=containers[-1])
+                        get_count += 1
+                    else:
+                        skip_count += 1
+                marker = oblist[-1]['name']
+                _, objlist = conn.get_container(
+                    sc['name'], marker=marker)
+            print "enqueued %d objects in %s, skipped %d objects" % (
+                get_count, sc['name'], skip_count)
+        container_marker = containers[-1]['name']
+        _, containers = conn.get_account(marker=container_marker)
 
     processor.stop()
 
@@ -190,25 +195,22 @@ def main():
         namecount += 1
 
     # Queue # = thread list
-    queueLock = threading.Lock()
     workQueue = Queue.Queue(0)  # queue size is infinite
     threads = []
     threadID = 1
 
     # Create new threads
     for tName in tenantThreadList:
-        thread = tenantThread(threadID, tName, workQueue, queueLock)
+        thread = tenantThread(threadID, tName, workQueue)
         thread.start()
         threads.append(thread)
         threadID += 1
 
     # Fill the queue
-    queueLock.acquire()
 
     # for word in nameList:
     for word in namedict.iteritems():
         workQueue.put(word)
-    queueLock.release()
 
     # Wait for queue to empty
     while not workQueue.empty():
