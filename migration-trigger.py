@@ -4,7 +4,6 @@ import swiftclient
 import pprint
 import Queue
 import threading
-import time
 import timeit
 import ConfigParser
 import sys
@@ -19,6 +18,52 @@ n_tenant_threads = 1
 # local variant use for code only
 pp = pprint.PrettyPrinter(indent=4)
 exitFlag = 0
+OBJECT_WORKERS = 20
+
+
+class ContainerProcessor(object):
+    def __init__(self, admin_user, admin_pass, auth_url, storage_url):
+        self.user = admin_user
+        self.u_pass = admin_pass
+        self.auth_url = auth_url
+        self.storage_url = storage_url
+        self.queue = Queue.Queue(OBJECT_WORKERS * 2)
+        self.threads = []
+
+        for i in range(OBJECT_WORKERS):
+            t = threading.Thread(target=self.worker)
+            t.start()
+            self.threads.append(t)
+
+    def worker(self):
+        conn = swiftclient.client.Connection(
+            authurl=self.auth_url,
+            user=self.user,
+            key=self.u_pass,
+            tenant_name=self.user,
+            auth_version='2.0',
+            os_options={'object_storage_url': self.storage_url})
+
+        while True:
+            work = self.queue.get()
+            if work is None:
+                break
+            try:
+                print 'GET: %s/%s' % (work['container'], work['name'])
+                conn.get_object(work['container'], work['name'])
+            except Exception as e:
+                print "error on %s/%s: %s" % (work['container'], work['name'],
+                                              repr(e))
+                sys.exc_clear()
+            self.queue.task_done()
+
+    def stop(self):
+        print "Stop called"
+        self.queue.join()
+        for i in range(OBJECT_WORKERS):
+            self.queue.put(None)
+        for t in self.threads:
+            t.join()
 
 
 def get_Config():
@@ -28,7 +73,6 @@ def get_Config():
     global n_tenant_threads
     global account_list
     global source_swift_base
-    global download_location
 
     config = ConfigParser.ConfigParser()
     config.read(r'migration-trigger.conf')
@@ -38,31 +82,25 @@ def get_Config():
     n_tenant_threads = config.getint('global', 'n_tenant_threads')
     account_list = config.get('global', 'account_list')
     source_swift_base = config.get('global', 'source_swift_base')
-    download_location = config.get('global', 'download_location')
 
 
 class tenantThread(threading.Thread):
-    def __init__(self, threadID, name, q, l,):
+    def __init__(self, threadID, name, q,):
         threading.Thread.__init__(self)
         self.threadID = threadID
         self.name = name
         self.q = q
-        self.L = l
 
     def run(self):
-        process_tenant_thread(self.name, self.q, self.L)
+        process_tenant_thread(self.name, self.q)
 
 
-def process_tenant_thread(threadName, q, l):
+def process_tenant_thread(threadName, q):
     while not exitFlag:
-        l.acquire()
-        if not q.empty():
-            data = q.get()
-            l.release()
-            process_tenant(data)
-        else:
-            l.release()
-        time.sleep(1)
+        data = q.get()
+        if data is None:
+            break
+        process_tenant(data)
 
 
 def make_tenant_threadlist(int_tenant_threads):
@@ -79,62 +117,51 @@ def process_tenant(data):
     global source_auth_url
     global account_list
     global source_swift_base
-    global download_location
 
-    print admin_user
-    print admin_pass
-    print source_auth_url
-    print account_list
-    print source_swift_base
-    print download_location
+    print "admin_user:", admin_user
+    print "admin_pass:", admin_pass
+    print "source_auth_url:", source_auth_url
+    print "account_list:", account_list
+    print "source_swift_base:", source_swift_base
 
-    try:
-        print data
-        # get source cluster connection by tenant
-        swift_s = swiftclient.client.Connection(
-            authurl=source_auth_url,
-            user=admin_user,
-            key=admin_pass,
-            tenant_name=admin_user,
-            auth_version='2.0',
-            os_options={'object_storage_url': source_swift_base+data[1]})
-        resp_headers, containers = swift_s.get_account()
-        print data[1] + ": " + \
-            str(float(resp_headers['x-account-bytes-used']))
+    processor = ContainerProcessor(admin_user, admin_pass, source_auth_url,
+                                   source_swift_base + data[1])
+
+    container_marker = ''
+    conn = swiftclient.client.Connection(
+        authurl=source_auth_url,
+        user=admin_user,
+        key=admin_pass,
+        tenant_name=admin_user,
+        auth_version='2.0',
+        os_options={'object_storage_url': source_swift_base+data[1]})
+    _, containers = conn.get_account(marker=container_marker)
+    while containers and containers[-1]['name'] != container_marker:
+
         for sc in containers:
-            print "container: " + str(sc['name'])
-            resp_headers_s, objlist = swift_s.get_container(sc['name'])
-            listing = objlist
-            while listing:
-                marker = listing[-1].get('name')
-                # print "marker: " + marker
-                resp_headers_s, objlist_again = swift_s.get_container(
+            marker = ''
+            _, oblist = conn.get_container(sc['name'], marker=marker)
+            print 'looking in', sc['name']
+            get_count = 0
+            skip_count = 0
+            while oblist and oblist[-1]['name'] != marker:
+                for ob in oblist:
+                    cl = ob.get('content_location')
+                    if cl and 'swift' not in cl:
+                        processor.queue.put({'container': sc['name'],
+                                             'name': ob['name']})
+                        get_count += 1
+                    else:
+                        skip_count += 1
+                marker = oblist[-1]['name']
+                _, objlist = conn.get_container(
                     sc['name'], marker=marker)
-                listing = objlist_again
-                if listing:
-                    objlist.extend(listing)
+            print "enqueued %d objects in %s, skipped %d objects" % (
+                get_count, sc['name'], skip_count)
+        container_marker = containers[-1]['name']
+        _, containers = conn.get_account(marker=container_marker)
 
-            for so in objlist:
-                if 'swift' not in so.get('content_location', []):
-                    print "GET object: " + str(so['name'])
-                    marker = str(so['name'])
-                    download_objoect(swift_s, sc['name'], so['name'],
-                                     download_location)
-        swift_s.close()
-    except Exception as err:
-        print data[1] + ": " + str(err)
-
-
-def download_objoect(swift_x, container_name, object_name, download_location):
-    try:
-        # print "download all: " +container_name + ": " + object_name
-        resp_headers, body = swift_x.get_object(container_name, object_name)
-        # bolreturn = True
-        # with open(download_location + '/' + object_name, 'w') as local:
-        #    local.write(body)
-    except Exception as err:
-        print container_name, object_name, "error: ", str(err)
-        sys.exc_clear()
+    processor.stop()
 
 
 def get_tenant_list(account_list):
@@ -168,25 +195,22 @@ def main():
         namecount += 1
 
     # Queue # = thread list
-    queueLock = threading.Lock()
     workQueue = Queue.Queue(0)  # queue size is infinite
     threads = []
     threadID = 1
 
     # Create new threads
     for tName in tenantThreadList:
-        thread = tenantThread(threadID, tName, workQueue, queueLock)
+        thread = tenantThread(threadID, tName, workQueue)
         thread.start()
         threads.append(thread)
         threadID += 1
 
     # Fill the queue
-    queueLock.acquire()
 
     # for word in nameList:
     for word in namedict.iteritems():
         workQueue.put(word)
-    queueLock.release()
 
     # Wait for queue to empty
     while not workQueue.empty():
