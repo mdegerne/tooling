@@ -19,6 +19,51 @@ n_tenant_threads = 1
 # local variant use for code only
 pp = pprint.PrettyPrinter(indent=4)
 exitFlag = 0
+OBJECT_WORKERS = 20
+
+
+class ContainerProcessor(object):
+    def __init__(self, admin_user, admin_pass, auth_url, storage_url):
+        self.user = admin_user
+        self.u_pass = admin_pass
+        self.auth_url = auth_url
+        self.storage_url = storage_url
+        self.queue = Queue.Queue(OBJECT_WORKERS * 2)
+        self.threads = []
+
+        for i in range(OBJECT_WORKERS):
+            t = threading.Thread(target=self.worker)
+            t.start()
+            self.threads.append(t)
+
+    def worker(self):
+        conn = swiftclient.client.Connection(
+            authurl=self.auth_url,
+            user=self.user,
+            key=self.u_pass,
+            tenant_name=self.user,
+            auth_version='2.0',
+            os_options={'object_storage_url': self.storage_url})
+
+        while True:
+            work = self.queue.get()
+            if work is None:
+                break
+            try:
+                print 'GET: %s/%s' % (work['container'], work['name'])
+                conn.get_object(work['container'], work['name'])
+            except Exception as e:
+                print "error on %s/%s: %s" % (work['container'], work['name'],
+                                              repr(e))
+                sys.exc_clear()
+            self.queue.task_done()
+
+    def stop(self):
+        self.queue.join()
+        for i in range(OBJECT_WORKERS):
+            self.queue.put(None)
+        for t in self.threads:
+            t.join()
 
 
 def get_Config():
@@ -88,53 +133,30 @@ def process_tenant(data):
     print source_swift_base
     print download_location
 
-    try:
-        print data
-        # get source cluster connection by tenant
-        swift_s = swiftclient.client.Connection(
-            authurl=source_auth_url,
-            user=admin_user,
-            key=admin_pass,
-            tenant_name=admin_user,
-            auth_version='2.0',
-            os_options={'object_storage_url': source_swift_base+data[1]})
-        resp_headers, containers = swift_s.get_account()
-        print data[1] + ": " + \
-            str(float(resp_headers['x-account-bytes-used']))
+    processor = ContainerProcessor(admin_user, admin_pass, source_auth_url,
+                                   source_swift_base + data[1])
+
+    conn = swiftclient.client.Connection(
+        authurl=source_auth_url,
+        user=admin_user,
+        key=admin_pass,
+        tenant_name=admin_user,
+        auth_version='2.0',
+        os_options={'object_storage_url': source_swift_base+data[1]})
+    _, containers = conn.get_account()
+    while containers:
+
         for sc in containers:
-            print "container: " + str(sc['name'])
-            resp_headers_s, objlist = swift_s.get_container(sc['name'])
-            listing = objlist
-            while listing:
-                marker = listing[-1].get('name')
-                # print "marker: " + marker
-                resp_headers_s, objlist_again = swift_s.get_container(
-                    sc['name'], marker=marker)
-                listing = objlist_again
-                if listing:
-                    objlist.extend(listing)
+            _, oblist = conn.get_container(sc['name'])
+            while oblist:
+                for ob in oblist:
+                    if 'swift' not in ob.get('content_location', []):
+                        processor.queue.put({'container': sc['name'],
+                                             'name': ob['name']})
+                _, objlist = conn.get_container(sc['name'], marker=oblist[-1])
+        _, containers = conn.get_account(marker=containers[-1])
 
-            for so in objlist:
-                if 'swift' not in so.get('content_location', []):
-                    print "GET object: " + str(so['name'])
-                    marker = str(so['name'])
-                    download_objoect(swift_s, sc['name'], so['name'],
-                                     download_location)
-        swift_s.close()
-    except Exception as err:
-        print data[1] + ": " + str(err)
-
-
-def download_objoect(swift_x, container_name, object_name, download_location):
-    try:
-        # print "download all: " +container_name + ": " + object_name
-        resp_headers, body = swift_x.get_object(container_name, object_name)
-        # bolreturn = True
-        # with open(download_location + '/' + object_name, 'w') as local:
-        #    local.write(body)
-    except Exception as err:
-        print container_name, object_name, "error: ", str(err)
-        sys.exc_clear()
+    processor.stop()
 
 
 def get_tenant_list(account_list):
