@@ -49,7 +49,7 @@ def set_storage_url(conn, account):
     print('Current connection URL: {}'.format(conn.url))
     path = '/v1/{}'.format(urllib.parse.quote(account))
     _, netloc, _, _, _ = urllib.parse.urlsplit(conn.url)
-    storage_url = urllib.parse.urlunparse(('http', conn.url, path, '', '', ''))
+    storage_url = urllib.parse.urlunparse(('http', netloc, path, '', '', ''))
     print('Setting storage URL to: {}'.format(storage_url))
     conn.url = storage_url
     conn.os_options['object_storage_url'] = storage_url
