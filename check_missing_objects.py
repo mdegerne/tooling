@@ -120,8 +120,9 @@ def containers_only(conn):
     for container in iterate_listing(conn.get_account):
         if not container:
             break
-        if 'content_location' in container and\
-                'swift' not in container['content_location']:
+        if 'content_location' not in container:
+            continue
+        if 'swift' not in container['content_location']:
             print('Container {} with {} objects has not yet been '
                   'migrated'.format(container['name'], container['count']))
 
@@ -181,8 +182,10 @@ def main():
         for container in iterate_listing(conn.get_account):
             if not container:
                 break
-            if 'content_location' in container and\
-                    'swift' not in container['content_location']:
+            if 'content_location' not in container:
+                # Skip local-only containers
+                continue
+            if 'swift' not in container['content_location']:
                 print(
                     'Container {} with {} objects has not yet been '
                     'migrated'.format(container['name'], container['count']))
