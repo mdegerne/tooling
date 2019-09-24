@@ -46,8 +46,10 @@ def parse_last_modified(entry):
 def set_storage_url(conn, account):
     # parsed_url = urllib.parse.urlparse(conn.url)
     urllib.parse.urlparse(conn.url)
+    print('Current connection URL: {}'.format(conn.url))
     path = '/v1/{}'.format(urllib.parse.quote(account))
     storage_url = urllib.parse.urljoin(conn.url, path)
+    print('Setting storage URL to: {}'.format(storage_url))
     conn.url = storage_url
     conn.os_options['object_storage_url'] = storage_url
 
