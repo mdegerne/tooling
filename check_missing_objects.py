@@ -27,7 +27,7 @@ def iterate_listing(list_func):
                     marker, repr(e)))
                 if tries == RETRIES:
                     raise e
-            time.sleep(random.randint(1, 1000) * tries)
+            time.sleep(random.random() * 10)
             tries += 1
 
         if not listing:
@@ -156,6 +156,9 @@ def main():
     threads = []
 
     conn = get_conn(args.auth_url, args.user, args.key, args.account)
+    if not conn:
+        print('Failed to get a connection')
+        return
 
     if not args.detail and not args.quick_compare:
         parser.print_help()
