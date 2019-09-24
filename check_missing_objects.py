@@ -28,6 +28,7 @@ def iterate_listing(list_func):
                 if tries == RETRIES:
                     raise e
             time.sleep(random.random() * 10)
+            print('Retrying listing')
             tries += 1
 
         if not listing:
@@ -119,7 +120,9 @@ def containers_only(conn):
     for container in iterate_listing(conn.get_account):
         if not container:
             break
-        if 'swift' not in container.get('content_location', []):
+        if 'content_location' not in container:
+            continue
+        if 'swift' not in container['content_location']:
             print('Container {} with {} objects has not yet been '
                   'migrated'.format(container['name'], container['count']))
 
@@ -179,7 +182,10 @@ def main():
         for container in iterate_listing(conn.get_account):
             if not container:
                 break
-            if 'swift' not in container.get('content_location', []):
+            if 'content_location' not in container:
+                # Skip local-only containers
+                continue
+            if 'swift' not in container['content_location']:
                 print(
                     'Container {} with {} objects has not yet been '
                     'migrated'.format(container['name'], container['count']))
