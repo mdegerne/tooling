@@ -51,9 +51,12 @@ class ContainerProcessor(object):
             try:
                 print 'GET: %s/%s' % (work['container'], work['name'])
                 conn.get_object(work['container'], work['name'])
+            except swiftclient.exception.ClientException as e:
+                print "error on %s/%s: (%d) %s" % (
+                    work['container'], work['name'], e.http_status, e.msg)
             except Exception as e:
                 print "error on %s/%s: %s" % (work['container'], work['name'],
-                                              repr(e))
+                                              str(e))
                 sys.exc_clear()
             self.queue.task_done()
 
