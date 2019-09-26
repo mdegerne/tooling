@@ -22,6 +22,9 @@ def iterate_listing(list_func):
             try:
                 _, listing = list_func(marker=marker)
                 break
+            except swiftclient.exception.ClientException as e:
+                print("Iterate failed at marker={}: ({}) {}".format(
+                    marker, e.http_status, e.msg))
             except Exception as e:
                 print('Iterate failed at marker={}: {}'.format(
                     marker, repr(e)))
@@ -106,10 +109,31 @@ def worker(config, work_queue):
                         results.append(entry)
                 entry = next(container_iter)
             if results:
-                print('Container {} has {} missing objects:'.format(
-                    work['container'], len(results)))
+                filtered_results = []
                 for entry in results:
+                    try:
+                        hdrs = client.head_object(
+                            work['container'], entry['name'])
+                        if not any([hdr.startswith('Remote-')
+                                    for hdr in hdrs]):
+                            continue
+                    except swiftclient.exception.ClientException as e:
+                        if e.http_status == 404:
+                            print('Object {}/{} does not exist'.format(
+                                work['container'], entry['name']))
+                            continue
+                        else:
+                            print('Failed to check object {}/{}: {} {}'.format(
+                                work['container'], entry['name'],
+                                e.http_status, e.msg))
+                    filtered_results.append(entry)
+                print('Container {} has {} missing objects:'.format(
+                    work['container'], len(filtered_results)))
+                for entry in filtered_results:
                     print(entry['name'])
+        except swiftclient.exception.ClientException as e:
+            print("Failed request in container {}: ({}) {}".format(
+                work['container'], e.http_status, e.msg))
         except Exception:
             print(traceback.format_exc())
         finally:
